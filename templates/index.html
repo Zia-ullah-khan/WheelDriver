@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Control Mapping</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; }
+        .container { width: 60%; margin: auto; }
+        select, button { font-size: 16px; margin: 10px; padding: 10px; }
+        #vehicleStatus, #connectionStatus, #robloxStatus { margin-top: 20px; }
+        .mapping-active { background-color: #ff9900; color: white; }
+        .debug-info { 
+            background-color: #f8f8f8; 
+            border: 1px solid #ddd; 
+            padding: 10px; 
+            margin-top: 20px;
+            text-align: left;
+            font-family: monospace;
+        }
+        .status-connected { color: green; font-weight: bold; }
+        .status-disconnected { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Select a Control Device</h2>
+        <select id="joystickSelect">
+            {% for joystick in joysticks %}
+                <option value="{{ loop.index0 }}">{{ joystick }}</option>
+            {% endfor %}
+        </select>
+        <button onclick="selectJoystick()">Use This Joystick</button>
+        <p id="connectionStatus">⚠️ Not Connected</p>
+
+        <h2>Roblox Connection Status</h2>
+        <p id="robloxStatus">🔄 Checking...</p>
+        <button onclick="checkRobloxConnection()">Check Connection</button>
+
+        <h2>Map Controls (Perform Action to Assign)</h2>
+        <button onclick="startMapping('steering')">Map Steering</button>
+        <button onclick="startMapping('throttle')">Map Throttle</button>
+        <button onclick="startMapping('brake')">Map Brake</button>
+        
+        <h3>Current Mapping</h3>
+        <p>Steering: <span id="mappedSteering">Not Assigned</span></p>
+        <p>Throttle: <span id="mappedThrottle">Not Assigned</span></p>
+        <p>Brake: <span id="mappedBrake">Not Assigned</span></p>
+
+        <h2>Live Vehicle Status</h2>
+        <div id="vehicleStatus">Waiting for data...</div>
+        
+        <div class="debug-info">
+            <h3>Debug Information</h3>
+            <div id="joystickInfo">No joystick selected</div>
+            <div id="lastControlUpdate">No control updates received</div>
+        </div>
+    </div>
+
+    <script>
+        var socket = io.connect("http://" + document.domain + ":" + location.port);
+        var mappingType = null;
+        var controlMapping = {
+            steering: null,
+            throttle: null,
+            brake: null
+        };
+        
+        var joystick = null;
+        var axisThreshold = 0.5;
+        var lastAxisValues = {};
+        var axisChangeTimeout = null;
+        var buttonPressTimeout = null;
+        var lastGamepadState = null;
+
+        socket.on("connect", function() {
+            document.getElementById("connectionStatus").innerHTML = "<span class='status-connected'>✅ Connected to Server</span>";
+            startPeriodicRobloxChecks();
+        });
+
+        socket.on("disconnect", function() {
+            document.getElementById("connectionStatus").innerHTML = "<span class='status-disconnected'>❌ Disconnected - Reconnect Needed</span>";
+        });
+
+        function startPeriodicRobloxChecks() {
+            checkRobloxConnection();
+            setInterval(checkRobloxConnection, 5000);
+        }
+
+        function selectJoystick() {
+            var joystickIndex = document.getElementById("joystickSelect").value;
+            socket.emit("select_joystick", joystickIndex);
+            
+            document.getElementById("mappedSteering").innerText = "Not Assigned";
+            document.getElementById("mappedThrottle").innerText = "Not Assigned";
+            document.getElementById("mappedBrake").innerText = "Not Assigned";
+            
+            alert("Joystick selected! Please map your controls now.");
+
+            setupJoystickMonitoring();
+        }
+        
+        socket.on("joystick_info", function(data) {
+            document.getElementById("joystickInfo").innerHTML = `
+                <p><b>Joystick:</b> ${data.name}</p>
+                <p><b>Axes:</b> ${data.axes} (0-${data.axes-1})</p>
+                <p><b>Buttons:</b> ${data.buttons} (0-${data.buttons-1})</p>
+            `;
+        });
+        
+        socket.on("mapping_updated", function(data) {
+            controlMapping = data;
+            
+            document.getElementById("mappedSteering").innerText = 
+                data.steering !== null ? `Axis ${data.steering}` : "Not Assigned";
+            document.getElementById("mappedThrottle").innerText = 
+                data.throttle !== null ? `Axis ${data.throttle}` : "Not Assigned";
+            document.getElementById("mappedBrake").innerText = 
+                data.brake !== null ? `Button ${data.brake}` : "Not Assigned";
+        });
+
+        function setupJoystickMonitoring() {
+            window.addEventListener("gamepadconnected", function(e) {
+                console.log("Gamepad connected:", e.gamepad.id);
+                document.getElementById("joystickInfo").innerHTML += `
+                    <p><b>Browser detected:</b> ${e.gamepad.id}</p>
+                `;
+            });
+
+            requestAnimationFrame(pollJoystick);
+        }
+
+        function pollJoystick() {
+            if (navigator.getGamepads) {
+                var gamepads = navigator.getGamepads();
+                var gamepad = null;
+                
+                for (var i = 0; i < gamepads.length; i++) {
+                    if (gamepads[i]) {
+                        gamepad = gamepads[i];
+                        break;
+                    }
+                }
+                
+                if (gamepad && mappingType) {
+                    if (!lastGamepadState) {
+                        lastGamepadState = {
+                            axes: Array.from(gamepad.axes),
+                            buttons: Array.from(gamepad.buttons).map(btn => btn.pressed)
+                        };
+                    }
+                    
+                    for (var i = 0; i < gamepad.axes.length; i++) {
+                        var value = gamepad.axes[i];
+                        var lastValue = lastGamepadState.axes[i] || 0;
+                        
+                        if (Math.abs(value) > axisThreshold && 
+                            Math.abs(value - lastValue) > 0.2) {
+                            
+                            if (mappingType === 'steering' || mappingType === 'throttle') {
+                                console.log(`Detected significant movement on axis ${i}: ${value}`);
+                                completeMapping(i, 'axis');
+                                break;
+                            }
+                        }
+                    }
+                    
+                    for (var j = 0; j < gamepad.buttons.length; j++) {
+                        var isPressed = gamepad.buttons[j].pressed;
+                        var wasPressed = lastGamepadState.buttons[j] || false;
+                        
+                        if (isPressed && !wasPressed) {
+                            if (mappingType === 'brake') {
+                                console.log(`Detected button press on button ${j}`);
+                                completeMapping(j, 'button');
+                                break;
+                            }
+                        }
+                    }
+                    
+                    lastGamepadState = {
+                        axes: Array.from(gamepad.axes),
+                        buttons: Array.from(gamepad.buttons).map(btn => btn.pressed)
+                    };
+                }
+            }
+            
+            requestAnimationFrame(pollJoystick);
+        }
+
+        function startMapping(type) {
+            if (mappingType) {
+                document.querySelector(`button[onclick="startMapping('${mappingType}')"]`).classList.remove('mapping-active');
+            }
+            
+            mappingType = type;
+            document.querySelector(`button[onclick="startMapping('${type}')"]`).classList.add('mapping-active');
+            
+            if (axisChangeTimeout) clearTimeout(axisChangeTimeout);
+            if (buttonPressTimeout) clearTimeout(buttonPressTimeout);
+            
+            lastAxisValues = {};
+            lastGamepadState = null;
+            
+            console.log(`Started mapping ${type}`);
+        }
+
+        function completeMapping(index, type) {
+            if (!mappingType) return;
+            
+            var button = document.querySelector(`button[onclick="startMapping('${mappingType}')"]`);
+            button.classList.remove('mapping-active');
+            
+            if (type === 'axis') {
+                controlMapping[mappingType] = index;
+                document.getElementById(`mapped${mappingType.charAt(0).toUpperCase() + mappingType.slice(1)}`).innerText = 
+                    `Axis ${index}`;
+            } else {
+                controlMapping[mappingType] = index;
+                document.getElementById(`mappedBrake`).innerText = `Button ${index}`;
+            }
+            
+            var update = {};
+            update[mappingType] = index;
+            socket.emit("update_mapping", update);
+            
+            console.log(`Mapped ${mappingType} to ${type} ${index}`);
+            mappingType = null;
+        }
+
+        function checkRobloxConnection() {
+            socket.emit("check_roblox_connection");
+        }
+
+        socket.on("roblox_connection_status", function(data) {
+            document.getElementById("robloxStatus").innerHTML = data.connected ? 
+                "<span class='status-connected'>✅ Connected to Roblox</span>" : 
+                "<span class='status-disconnected'>❌ Not Connected to Roblox</span>";
+        });
+
+        socket.on("vehicle_state", function(data) {
+            console.log("Received vehicle state:", data);
+            
+            if (data.CurrentSpeed !== undefined) {
+                document.getElementById("vehicleStatus").innerHTML = `
+                    <p><b>Speed:</b> ${data.CurrentSpeed.toFixed(2)} m/s</p>
+                    <p><b>Occupied:</b> ${data.Occupied ? "Yes" : "No"}</p>
+                    <p><b>Last Update:</b> ${new Date().toLocaleTimeString()}</p>
+                `;
+            }
+        });
+        
+        socket.on("control_update", function(data) {
+            document.getElementById("lastControlUpdate").innerHTML = `
+                <p><b>Last Control Values:</b></p>
+                <p>Throttle: ${data.Throttle}</p>
+                <p>Steering: ${data.Steering}</p>
+                <p>Handbrake: ${data.Handbrake ? "ON" : "OFF"}</p>
+                <p><b>Updated:</b> ${new Date().toLocaleTimeString()}</p>
+            `;
+        });
+
+        window.onload = function() {
+            checkRobloxConnection();
+            
+            if (navigator.getGamepads) {
+                var gamepads = navigator.getGamepads();
+                for (var i = 0; i < gamepads.length; i++) {
+                    if (gamepads[i]) {
+                        document.getElementById("joystickInfo").innerHTML += `
+                            <p><b>Browser detected on load:</b> ${gamepads[i].id}</p>
+                        `;
+                    }
+                }
+            }
+        };
+    </script>
+</body>
+</html>
