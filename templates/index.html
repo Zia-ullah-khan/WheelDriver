@@ -37,6 +37,10 @@
         <h2>Roblox Connection Status</h2>
         <p id="robloxStatus">🔄 Checking...</p>
         <button onclick="checkRobloxConnection()">Check Connection</button>
+        <div id="robloxDebugInfo" class="debug-info" style="display: none;">
+            <h4>Roblox Connection Details</h4>
+            <pre id="robloxDebugData">No data yet</pre>
+        </div>
 
         <h2>Map Controls (Perform Action to Assign)</h2>
         <button onclick="startMapping('steering')">Map Steering</button>
@@ -55,6 +59,14 @@
             <h3>Debug Information</h3>
             <div id="joystickInfo">No joystick selected</div>
             <div id="lastControlUpdate">No control updates received</div>
+            <div id="mappingInfo">
+                <h4>Control Mapping Details</h4>
+                <p>For a throttle/brake axis:</p>
+                <ul>
+                    <li>0 to 1 = Throttle (forward)</li>
+                    <li>0 to -1 = Brake (backward)</li>
+                </ul>
+            </div>
         </div>
     </div>
 
@@ -231,12 +243,20 @@
 
         function checkRobloxConnection() {
             socket.emit("check_roblox_connection");
+            console.log("Checking Roblox connection...");
         }
 
         socket.on("roblox_connection_status", function(data) {
             document.getElementById("robloxStatus").innerHTML = data.connected ? 
                 "<span class='status-connected'>✅ Connected to Roblox</span>" : 
                 "<span class='status-disconnected'>❌ Not Connected to Roblox</span>";
+                
+            document.getElementById("robloxDebugInfo").style.display = "block";
+            document.getElementById("robloxDebugData").innerText = 
+                `Last Heartbeat: ${new Date(data.last_heartbeat * 1000).toLocaleTimeString()}\n` +
+                `Current Time: ${new Date(data.now * 1000).toLocaleTimeString()}\n` +
+                `Time Difference: ${data.diff.toFixed(2)} seconds\n` +
+                `Connection Status: ${data.connected ? "Connected" : "Disconnected"}`;
         });
 
         socket.on("vehicle_state", function(data) {
@@ -254,8 +274,9 @@
         socket.on("control_update", function(data) {
             document.getElementById("lastControlUpdate").innerHTML = `
                 <p><b>Last Control Values:</b></p>
-                <p>Throttle: ${data.Throttle}</p>
-                <p>Steering: ${data.Steering}</p>
+                <p>Throttle: ${data.Throttle !== undefined ? data.Throttle.toFixed(2) : 'N/A'}</p>
+                <p>Brake: ${data.Brake !== undefined ? data.Brake.toFixed(2) : 'N/A'}</p>
+                <p>Steering: ${data.Steering !== undefined ? data.Steering.toFixed(2) : 'N/A'}</p>
                 <p>Handbrake: ${data.Handbrake ? "ON" : "OFF"}</p>
                 <p><b>Updated:</b> ${new Date().toLocaleTimeString()}</p>
             `;
@@ -263,6 +284,8 @@
 
         window.onload = function() {
             checkRobloxConnection();
+            
+            setInterval(checkRobloxConnection, 3000);
             
             if (navigator.getGamepads) {
                 var gamepads = navigator.getGamepads();

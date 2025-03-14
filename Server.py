@@ -16,6 +16,9 @@ control_mapping = {"steering": None, "throttle": None, "brake": None}
 latest_controls = {"Throttle": 0, "Steering": 0, "Handbrake": False}
 last_roblox_heartbeat = None
 
+last_roblox_heartbeat = time.time()
+print("Server initialized with default heartbeat timestamp")
+
 vehicle_state_queue = queue.Queue(maxsize=5)
 
 @app.route("/")
@@ -32,14 +35,26 @@ def roblox_heartbeat():
     global last_roblox_heartbeat
     last_roblox_heartbeat = time.time()
     print(f"Received heartbeat from Roblox at {time.strftime('%H:%M:%S')}")
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "timestamp": last_roblox_heartbeat})
 
 @socketio.on("check_roblox_connection")
 def check_roblox_connection():
+    global last_roblox_heartbeat
     now = time.time()
-    connected = last_roblox_heartbeat and (now - last_roblox_heartbeat < 5)
-    emit("roblox_connection_status", {"connected": connected})
-    print(f"Roblox connection status check: {'Connected' if connected else 'Disconnected'}")
+    
+    if last_roblox_heartbeat is None:
+        last_roblox_heartbeat = now
+        
+    connected = (now - last_roblox_heartbeat < 10)
+    
+    emit("roblox_connection_status", {
+        "connected": connected, 
+        "last_heartbeat": last_roblox_heartbeat,
+        "now": now,
+        "diff": now - last_roblox_heartbeat
+    })
+    
+    print(f"Roblox connection status check: {'Connected' if connected else 'Disconnected'} (Last heartbeat: {round(now - last_roblox_heartbeat, 2)}s ago)")
 
 @app.route("/controls", methods=["GET"])
 def get_controls():
@@ -122,11 +137,13 @@ def update_mapping(data):
     for map_type, value in data.items():
         if map_type in valid_types:
             try:
+                value = int(value)
+                
                 if map_type == "brake":
                     if selected_joystick is not None:
                         joystick = pygame.joystick.Joystick(selected_joystick)
                         if value < joystick.get_numbuttons():
-                            control_mapping[map_type] = int(value)
+                            control_mapping[map_type] = value
                             print(f"Mapped {map_type} to button {value}")
                         else:
                             print(f"Invalid button index: {value}")
@@ -134,7 +151,7 @@ def update_mapping(data):
                     if selected_joystick is not None:
                         joystick = pygame.joystick.Joystick(selected_joystick)
                         if value < joystick.get_numaxes():
-                            control_mapping[map_type] = int(value)
+                            control_mapping[map_type] = value
                             print(f"Mapped {map_type} to axis {value}")
                         else:
                             print(f"Invalid axis index: {value}")
@@ -146,7 +163,7 @@ def update_mapping(data):
 
 def joystick_listener():
     global latest_controls
-    last_values = {"Steering": 0, "Throttle": 0, "Handbrake": False}
+    last_values = {"Steering": 0, "Throttle": 0, "Brake": 0, "Handbrake": False}
     
     while True:
         pygame.event.pump()
@@ -158,34 +175,60 @@ def joystick_listener():
                 changed = False
                 
                 if control_mapping["steering"] is not None:
-                    new_steering = round(joystick.get_axis(control_mapping["steering"]), 2)
-                    if abs(new_steering - last_values["Steering"]) > 0.01:
-                        latest_controls["Steering"] = new_steering
-                        last_values["Steering"] = new_steering
-                        changed = True
+                    try:
+                        new_steering = round(joystick.get_axis(control_mapping["steering"]), 2)
+                        if abs(new_steering - last_values["Steering"]) > 0.01:
+                            latest_controls["Steering"] = new_steering
+                            last_values["Steering"] = new_steering
+                            changed = True
+                    except Exception as e:
+                        print(f"Error reading steering: {e}")
 
                 if control_mapping["throttle"] is not None:
-                    new_throttle = round(joystick.get_axis(control_mapping["throttle"]), 2)
-                    if abs(new_throttle - last_values["Throttle"]) > 0.01:
-                        latest_controls["Throttle"] = new_throttle
-                        last_values["Throttle"] = new_throttle
-                        changed = True
+                    try:
+                        raw_value = joystick.get_axis(control_mapping["throttle"])
+                        
+                        new_throttle = max(0, round(raw_value, 2))
+                        
+                        new_brake = max(0, round(-raw_value, 2)) 
+                        
+                        if abs(new_throttle - last_values["Throttle"]) > 0.01:
+                            latest_controls["Throttle"] = new_throttle
+                            last_values["Throttle"] = new_throttle
+                            changed = True
+                            
+                        if abs(new_brake - last_values["Brake"]) > 0.01:
+                            latest_controls["Brake"] = new_brake
+                            last_values["Brake"] = new_brake
+                            changed = True
+                    except Exception as e:
+                        print(f"Error reading throttle/brake: {e}")
 
                 if control_mapping["brake"] is not None:
-                    new_handbrake = bool(joystick.get_button(control_mapping["brake"]))
-                    if new_handbrake != last_values["Handbrake"]:
-                        latest_controls["Handbrake"] = new_handbrake
-                        last_values["Handbrake"] = new_handbrake
-                        changed = True
+                    try:
+                        new_handbrake = bool(joystick.get_button(control_mapping["brake"]))
+                        if new_handbrake != last_values["Handbrake"]:
+                            latest_controls["Handbrake"] = new_handbrake
+                            last_values["Handbrake"] = new_handbrake
+                            changed = True
+                    except Exception as e:
+                        print(f"Error reading brake button: {e}")
                         
                 if changed:
+                    if hasattr(joystick_listener, 'debug_counter'):
+                        joystick_listener.debug_counter += 1
+                    else:
+                        joystick_listener.debug_counter = 0
+                        
+                    if joystick_listener.debug_counter % 100 == 0:
+                        print(f"Current controls: {latest_controls}, Mapping: {control_mapping}")
+                        
                     socketio.emit("control_update", latest_controls)
                     
-            except pygame.error:
-                print("Joystick error, resetting...")
+            except pygame.error as e:
+                print(f"Joystick error: {e}, resetting...")
                 pygame.joystick.quit()
                 pygame.joystick.init()
-                time.sleep(1)
             
         time.sleep(0.01)
 

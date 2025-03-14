@@ -77,22 +77,46 @@ end
 local targetInputs = {
     Throttle = 0,
     Steering = 0,
+    Brake = 0,
     Handbrake = false
 }
 
 local function smoothlyApplyInputs()
     local alpha = 0.3
     
+    -- Apply handbrake immediately (no smoothing)
     inputStates.Handbrake = targetInputs.Handbrake
     
+    -- Smoothly interpolate steering, throttle and brake
     inputStates.Throttle = inputStates.Throttle + (targetInputs.Throttle - inputStates.Throttle) * alpha
     inputStates.Steering = inputStates.Steering + (targetInputs.Steering - inputStates.Steering) * alpha
     
+    -- Apply to vehicle
+    -- Use throttle directly as it's already 0 to 1
     vehicleSeat.ThrottleFloat = inputStates.Throttle
+    
+    -- Use steering directly
     vehicleSeat.SteerFloat = inputStates.Steering
     
+    -- If we have brake value, apply it (should be implemented in the vehicle)
+    if vehicleSeat:FindFirstChild("BrakeFloat") then
+        vehicleSeat.BrakeFloat.Value = targetInputs.Brake
+    end
+    
+    -- Apply handbrake if present
     if vehicleSeat:FindFirstChild("Handbrake") then
         vehicleSeat.Handbrake.Value = inputStates.Handbrake
+    end
+    
+    -- Log current input state periodically
+    if not _G.lastInputLog or (os.clock() - _G.lastInputLog) > 5 then
+        _G.lastInputLog = os.clock()
+        logMessage("Current vehicle inputs", {
+            Throttle = inputStates.Throttle,
+            Brake = targetInputs.Brake,
+            Steering = inputStates.Steering,
+            Handbrake = inputStates.Handbrake
+        })
     end
 end
 
@@ -120,12 +144,19 @@ local function getExternalControls()
                     logMessage("Received controls from server", controls)
                 end
     
+                -- Update target values from server
                 if controls.Throttle ~= nil then
                     targetInputs.Throttle = controls.Throttle
                 end
+                
                 if controls.Steering ~= nil then
                     targetInputs.Steering = controls.Steering
                 end
+                
+                if controls.Brake ~= nil then
+                    targetInputs.Brake = controls.Brake
+                end
+                
                 if controls.Handbrake ~= nil then
                     targetInputs.Handbrake = controls.Handbrake
                 end
@@ -146,23 +177,32 @@ local function sendHeartbeat()
     
     task.spawn(function()
         pcall(function()
-            local success = pcall(function()
-                return HttpService:PostAsync(heartbeatEndpoint, "{}", Enum.HttpContentType.ApplicationJson, false, {
+            local success, result = pcall(function()
+                return HttpService:PostAsync(heartbeatEndpoint, HttpService:JSONEncode({
+                    timestamp = os.time(),
+                    game = game.PlaceId,
+                    player = game.Players.LocalPlayer and game.Players.LocalPlayer.Name or "None"
+                }), Enum.HttpContentType.ApplicationJson, false, {
                     ["Content-Type"] = "application/json"
                 })
             end)
             
             requestQueue.pending = math.max(0, requestQueue.pending - 1)
             
-            if totalRequests.heartbeats % 5 == 0 and success then
-                logMessage("Heartbeat sent successfully")
+            if success then
+                if totalRequests.heartbeats % 5 == 0 then
+                    logMessage("Heartbeat sent successfully")
+                end
+            else
+                -- Log all heartbeat failures to help diagnose issues
+                logMessage("Failed to send heartbeat: " .. tostring(result))
             end
         end)
     end)
 end
 
 local pollRate = 0.1
-local heartbeatRate = 2.0
+local heartbeatRate = 1.0  -- Changed from 2.0 to 1.0 seconds
 local lastHeartbeat = 0
 
 local totalRequests = {
@@ -209,7 +249,24 @@ logMessage("🚀 Wheel driver client starting with server URL: " .. serverUrl)
 logMessage("Current vehicle seat properties", {
     Name = vehicleSeat.Name,
     HasHandbrake = vehicleSeat:FindFirstChild("Handbrake") ~= nil,
+    HasBrake = vehicleSeat:FindFirstChild("BrakeFloat") ~= nil,
     ClassName = vehicleSeat.ClassName
 })
 
-print("✅ Wheel driver client loaded - Using optimized networking with input smoothing")
+-- Create BrakeFloat value if it doesn't exist
+if not vehicleSeat:FindFirstChild("BrakeFloat") then
+    local brakeValue = Instance.new("NumberValue")
+    brakeValue.Name = "BrakeFloat"
+    brakeValue.Value = 0
+    brakeValue.Parent = vehicleSeat
+    logMessage("Created BrakeFloat value for braking")
+end
+
+-- Send immediate heartbeat on script start
+task.spawn(function()
+    wait(1)  -- Brief delay to ensure everything is initialized
+    sendHeartbeat()
+    logMessage("Initial heartbeat sent")
+end)
+
+print("✅ Wheel driver client loaded - Using optimized networking with input smoothing and brake support")
